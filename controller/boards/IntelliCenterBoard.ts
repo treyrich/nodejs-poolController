@@ -2850,6 +2850,13 @@ class IntelliCenterBodyCommands extends BodyCommands {
             delete bhs._processingStartTime;
         }
         
+        // Additional safety check: if processing is true but no start time is set, reset it
+        if (bhs.processing && !bhs._processingStartTime) {
+            logger.warn(`Found processing state without start time, resetting`);
+            bhs.processing = false;
+            bhs.bytes = [];
+        }
+        
         if (typeof data !== 'undefined' && typeof bodyId !== 'undefined' && bodyId > 0) {
             let body = bodyId === 2 ? bhs.body2 : bhs.body1;
             if (!bhs.bytes.includes(byte) && byte) bhs.bytes.push(byte);
@@ -2902,10 +2909,12 @@ class IntelliCenterBodyCommands extends BodyCommands {
                 state.emitEquipmentChanges();
             } catch (err) {
                 logger.error(`Error in queueBodyHeatSettings: ${err.message}`);
+                // On communication failure, clear the queue to prevent infinite retry loops
+                // The specific heat settings that failed will need to be retried by the user
                 bhs.processing = false;
                 bhs.bytes = [];
                 delete bhs._processingStartTime;
-                throw (err);
+                return false; // Don't throw the error as this can cause application lockup
             }
             finally {
                 bhs.processing = false;
@@ -2915,20 +2924,20 @@ class IntelliCenterBodyCommands extends BodyCommands {
             return true;
         }
         else {
-            // Try every second to re-try if we have a bunch at once.
-            if (bhs.bytes.length > 0) {
+            // If we have pending bytes but processing is already happening, they will be processed
+            // in the next cycle. Don't schedule additional setTimeout to avoid race conditions.
+            if (bhs.bytes.length > 0 && !bhs.processing) {
                 setTimeout(async () => {
                     try {
                         await this.queueBodyHeatSettings();
                     } catch (err) {
-                        logger.error(`Error sending queued body setpoint message: ${err.message}`);
-                        throw (err);
+                        logger.error(`Error in delayed bodyHeatSettings processing: ${err.message}`);
+                        // Reset processing state to prevent permanent lockup
+                        bhs.processing = false;
+                        bhs.bytes = [];
+                        delete bhs._processingStartTime;
                     }
-                }, 3000);
-            }
-            else {
-                bhs.processing = false;
-                delete bhs._processingStartTime;
+                }, 1000); // Reduced from 3000ms to 1000ms for better responsiveness
             }
             return true;
         }
@@ -3001,7 +3010,10 @@ class IntelliCenterBodyCommands extends BodyCommands {
     public async setHeatModeAsync(body: Body, mode: number): Promise<BodyTempState> {
         let modes = sys.board.bodies.getHeatModes(body.id);
         if (typeof modes.find(elem => elem.val === mode) === 'undefined') return Promise.reject(new InvalidEquipmentDataError(`Cannot set heat mode to ${mode} since this is not a valid mode for the ${body.name}`, 'Body', mode));
-        await this.queueBodyHeatSettings(body.id, body.id === 2 ? 23 : 22, { heatMode: mode });
+        let success = await this.queueBodyHeatSettings(body.id, body.id === 2 ? 23 : 22, { heatMode: mode });
+        if (!success) {
+            logger.warn(`Failed to set heat mode for ${body.name}, communication error - please try again`);
+        }
         return state.temps.bodies.getItemById(body.id);
         /*
     
@@ -3057,7 +3069,10 @@ class IntelliCenterBodyCommands extends BodyCommands {
     public async setHeatSetpointAsync(body: Body, setPoint: number): Promise<BodyTempState> {
         if (typeof setPoint === 'undefined') return Promise.reject(new InvalidEquipmentDataError(`Cannot set heat setpoint to undefined for the ${body.name}`, 'Body', setPoint));
         else if (setPoint < 0 || setPoint > 110) return Promise.reject(new InvalidEquipmentDataError(`Cannot set heat setpoint to ${setPoint} for the ${body.name}`, 'Body', setPoint));
-        await this.queueBodyHeatSettings(body.id, body.id === 2 ? 20 : 18, { heatSetpoint: setPoint });
+        let success = await this.queueBodyHeatSettings(body.id, body.id === 2 ? 20 : 18, { heatSetpoint: setPoint });
+        if (!success) {
+            logger.warn(`Failed to set heat setpoint for ${body.name}, communication error - please try again`);
+        }
         return state.temps.bodies.getItemById(body.id);
         /*
         let byte2 = 18;
@@ -3109,7 +3124,10 @@ class IntelliCenterBodyCommands extends BodyCommands {
     public async setCoolSetpointAsync(body: Body, setPoint: number): Promise<BodyTempState> {
         if (typeof setPoint === 'undefined') return Promise.reject(new InvalidEquipmentDataError(`Cannot set cooling setpoint to undefined for the ${body.name}`, 'Body', setPoint));
         else if (setPoint < 0 || setPoint > 110) return Promise.reject(new InvalidEquipmentDataError(`Cannot set cooling setpoint to ${setPoint} for the ${body.name}`, 'Body', setPoint));
-        await this.queueBodyHeatSettings(body.id, body.id === 2 ? 21 : 19, { coolSetpoint: setPoint });
+        let success = await this.queueBodyHeatSettings(body.id, body.id === 2 ? 21 : 19, { coolSetpoint: setPoint });
+        if (!success) {
+            logger.warn(`Failed to set cool setpoint for ${body.name}, communication error - please try again`);
+        }
         return state.temps.bodies.getItemById(body.id);
         /*
         let byte2 = 19;
