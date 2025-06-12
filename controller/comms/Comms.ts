@@ -530,6 +530,8 @@ export class RS485Port {
     private _outBuffer: Outbound[] = [];
     private _waitingPacket: Outbound;
     private _msg: Inbound;
+    private _lastCollisionTime: number = 0;
+    private _collisionCount: number = 0;
     // Connection management functions
     public async openAsync(cfg?: any): Promise<boolean> {
         if (this.isOpen) await this.closeAsync();
@@ -1208,6 +1210,59 @@ export class RS485Port {
             }
         }
         return false;
+    }
+    
+    public handleCollisionFlood() {
+        const now = Date.now();
+        
+        // Track collision frequency
+        if (now - this._lastCollisionTime < 5000) { // Within 5 seconds
+            this._collisionCount++;
+        } else {
+            this._collisionCount = 1;
+        }
+        this._lastCollisionTime = now;
+        
+        // If we have more than 10 collision floods in 5 seconds, trigger recovery
+        if (this._collisionCount > 10) {
+            logger.warn(`[Port ${this.portId}] Communication breakdown detected - ${this._collisionCount} collision floods in 5 seconds. Triggering recovery.`);
+            this.triggerCommunicationRecovery();
+            this._collisionCount = 0;
+        }
+    }
+    
+    private triggerCommunicationRecovery() {
+        logger.warn(`[Port ${this.portId}] Triggering communication recovery - clearing buffers and resetting connection`);
+        
+        // Clear all communication buffers
+        this._inBytes = [];
+        this._inBuffer = [];
+        this._msg = undefined;
+        
+        // Clear any waiting packets that might be stuck
+        if (this._waitingPacket) {
+            logger.warn(`[Port ${this.portId}] Aborting stuck waiting packet: ${this._waitingPacket.toShortPacket()}`);
+            this._waitingPacket.failed = true;
+            if (typeof this._waitingPacket.onAbort === 'function') {
+                this._waitingPacket.onAbort();
+            }
+            this._waitingPacket = null;
+        }
+        
+        // Reset RTS flag
+        this.isRTS = true;
+        
+        // Force a connection reset after a short delay to allow current operations to complete
+        setTimeout(async () => {
+            try {
+                logger.warn(`[Port ${this.portId}] Performing connection reset due to communication breakdown`);
+                await this.closeAsync();
+                await this.openAsync();
+                logger.info(`[Port ${this.portId}] Communication recovery completed`);
+            } catch (err) {
+                logger.error(`[Port ${this.portId}] Error during communication recovery: ${err.message}`);
+            }
+        }, 1000);
     }
 }
 export var conn: Connection = new Connection();

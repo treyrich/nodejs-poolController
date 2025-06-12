@@ -508,6 +508,19 @@ export class Inbound extends Message {
                     let arr = bytes.slice(0, ndx);
                     // Remove all but the last 4 bytes.  This will result in nothing anyway.
                     logger.verbose(`[Port ${this.portId}] Tossed Inbound Bytes ${arr} due to an unrecoverable collision.`);
+                    
+                    // Check if we're getting a flood of null bytes which indicates a communication breakdown
+                    let nullByteCount = arr.filter(b => b === 0).length;
+                    if (nullByteCount > arr.length * 0.8) { // More than 80% null bytes
+                        // Emit a collision event that the port can handle for recovery
+                        if (typeof this.portId !== 'undefined') {
+                            const conn = require('../../comms/Comms').conn;
+                            const port = conn.findPortById(this.portId);
+                            if (port && typeof port.handleCollisionFlood === 'function') {
+                                port.handleCollisionFlood();
+                            }
+                        }
+                    }
                 }
                 this.padding = [];
                 break;
